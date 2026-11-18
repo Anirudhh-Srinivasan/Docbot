@@ -47,10 +47,8 @@ async def lifespan(application):
 
 app = FastAPI(title="DocBot", lifespan=lifespan)
 origins = [s.strip() for s in os.getenv("ALLOWED_ORIGINS", "http://localhost:8000,http://127.0.0.1:8000").split(",") if s.strip()]
-if "*" in origins:
-    raise ValueError("Configure explicit ALLOWED_ORIGINS")
-app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["GET", "POST", "DELETE"],
-                   allow_headers=["Content-Type", "X-Admin-Key"])
+if any(not re.fullmatch(r"https?://[A-Za-z0-9.-]+(?::[0-9]+)?", origin) for origin in origins):
+    raise ValueError("Configure exact HTTP(S) origins without paths or wildcards")
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
 
@@ -72,7 +70,14 @@ async def rate_limit(request: Request, call_next):
             return JSONResponse({"detail": "Rate limit reached. Try again shortly."}, 429,
                                 headers={"Retry-After": str(math.ceil(until - now))})
         buckets[host] = (until, count + 1)
-    return await call_next(request)
+    response = await call_next(request)
+    if request.url.path in {"/", "/static/index.html"}:
+        response.headers["Content-Security-Policy"] = "frame-ancestors 'self' " + " ".join(origins)
+    return response
+
+
+app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["GET", "POST", "DELETE"],
+                   allow_headers=["Content-Type", "X-Admin-Key"])
 
 
 @app.get("/")

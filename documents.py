@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 MAX_BYTES = 2_000_000
 
@@ -75,9 +75,10 @@ def fetch_page(url):
     with tempfile.TemporaryDirectory() as tmp:
         body = Path(tmp, "page")
         result = subprocess.run(
-            ["curl", "-q", "--globoff", "--silent", "--noproxy", "*", "--max-time", "12",
+            ["prlimit", f"--fsize={MAX_BYTES}", "--", "curl", "-q", "--globoff", "--silent", "--noproxy", "*", "--max-time", "12",
              "--max-filesize", str(MAX_BYTES), "--resolve", f"{host}:{port}:{addresses[0]}",
-             "--output", str(body), "--write-out", "%{http_code} %{content_type}", "--", url],
+             "--output", str(body), "--write-out", "%{http_code} %{content_type}", "--",
+             urlunsplit((parts.scheme, f"{host}:{port}", parts.path or "/", parts.query, ""))],
             capture_output=True, timeout=15,
         )
         status, _, mime = result.stdout.decode(errors="replace").partition(" ")
