@@ -1,0 +1,9 @@
+.env
+.env.*
+.venv
+chroma_db
+*.bundle
+**/__pycache__
+.agents
+.aws
+.codex
