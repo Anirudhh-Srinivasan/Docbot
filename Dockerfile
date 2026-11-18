@@ -9,4 +9,4 @@ ENV HF_HUB_OFFLINE=1
 COPY app.py ingest.py documents.py ./
 COPY static static
 COPY docs docs
-CMD ["sh", "-c", "exec python -m uvicorn app:app --host 0.0.0.0 --port \"\${PORT:-8000}\" --workers 1"]
+CMD ["sh", "-c", "exec python -m uvicorn app:app --host 0.0.0.0 --port \"${PORT:-8000}\" --workers 1"]
