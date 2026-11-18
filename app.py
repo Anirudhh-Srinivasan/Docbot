@@ -141,3 +141,53 @@ def delete(site: Site, document_id: str):
             raise HTTPException(404, "Document was not found in this site")
         collection.delete(where={"document_id": document_id})
     return {"deleted": document_id}
+
+
+class AskRequest(BaseModel):
+    question: str = Field(max_length=2000)
+
+
+class ChatRequest(AskRequest):
+    site_id: str = Field(pattern="^" + SITE_PATTERN + "$")
+
+
+def generate(question, sources, key):
+    context = [dict(id=i, text=s["text"]) for i, s in enumerate(sources, 1)]
+    with Groq(api_key=key, timeout=25, max_retries=0) as client:
+        result = client.chat.completions.create(
+            model="llama-3.3-70b-versatile", temperature=0.2, max_tokens=600,
+            response_format={"type": "json_object"},
+            messages=[{"role": "system", "content": SYSTEM_PROMPT},
+                      {"role": "user", "content": json.dumps(dict(question=question, evidence=context))}],
+        )
+    return json.loads(result.choices[0].message.content)
+
+
+@app.post("/chat")
+def chat(request: ChatRequest):
+    question = request.question.strip()
+    if not question:
+        raise HTTPException(400, "Please enter a question")
+    with index_lock:
+        sources = app.state.index.search(request.site_id, question)
+    if not sources:
+        raise HTTPException(404, "This site has no indexed documents")
+    key = os.getenv("GROQ_API_KEY", "").strip()
+    if not key:
+        raise HTTPException(503, "Chat provider is not configured")
+    try:
+        result = generate(question, sources, key)
+        answer, refs = result["answer"].strip(), result["citations"]
+        if not isinstance(refs, list):
+            raise ValueError("Expected a citation list")
+        if (answer == FALLBACK or not answer or not refs or
+                any(type(i) is not int or not 1 <= i <= len(sources) for i in refs)):
+            return {"answer": FALLBACK, "sources": []}
+    except Exception as exc:
+        raise HTTPException(502, "Chat provider could not return an answer. Try again later.") from exc
+    return {"answer": answer, "sources": [sources[i - 1] for i in dict.fromkeys(refs)]}
+
+
+@app.post("/ask")
+def ask(request: AskRequest):
+    return chat(ChatRequest(site_id="orbit", question=request.question))
