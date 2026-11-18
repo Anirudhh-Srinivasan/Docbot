@@ -1,36 +1,80 @@
-"""Small manual retrieval-and-answer smoke evaluation against a running DocBot."""
+"""Evaluate real retrieval on an isolated sample index, optionally exercise Groq."""
+import argparse
+import os
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
-import requests
+from app import FALLBACK, ChatRequest, app, chat
+from ingest import DOCS_DIR, Index
 
-BASE_URL = "http://127.0.0.1:8000"
+# Expected passage must match BOTH source filename and a literal supporting fact.
 CASES = [
-    ("How long does a workspace invitation last?", ["7 days"]),
-    ("What is Orbit Team pricing per member each month?", ["$12", "member"]),
-    ("How much does annual billing discount paid plans?", ["15%"]),
-    ("What permission does the GitHub integration need to sync issues?", ["Issues"]),
-    ("What is the Orbit API rate limit per token?", ["120", "minute"]),
-    ("How long are encrypted backups retained?", ["30 days"]),
+    ("How long does a workspace invitation last?", "getting-started", "7 days"),
+    ("When are weekly summaries sent?", "getting-started", "Monday"),
+    ("How many active projects can a free workspace have?", "getting-started", "2 active projects"),
+    ("How long is the new workspace trial?", "getting-started", "14-day"),
+    ("What does Team cost per member?", "pricing-and-billing", "$12"),
+    ("What discount is there for annual billing?", "pricing-and-billing", "15%"),
+    ("How much file storage does Team include?", "pricing-and-billing", "10 GB"),
+    ("When does a downgrade take effect?", "pricing-and-billing", "next renewal"),
+    ("Which permission is needed to sync GitHub issues?", "troubleshooting", "Issues permission"),
+    ("How quickly does GitHub sync retry after reconnecting?", "troubleshooting", "10 minutes"),
+    ("Which plan includes SSO for sign-in?", "troubleshooting", "Business"),
+    ("How many API requests can I send per minute?", "api-usage", "120"),
+    ("How many items can a list endpoint return per page?", "api-usage", "50"),
+    ("What HTTP status does a successful issue creation return?", "api-usage", "201"),
+    ("Where is workspace data hosted?", "security-and-privacy", "Northern Virginia"),
+    ("How long are encrypted backups retained?", "security-and-privacy", "30 days"),
+    ("Which encryption is used at rest?", "security-and-privacy", "AES-256"),
 ]
+UNKNOWN = ["How much does Orbit charge for SMS alerts?", "What is the Android app download size?"]
 
 
-def main() -> None:
-    passed = 0
-    for question, expected_keywords in CASES:
-        try:
-            response = requests.post(f"{BASE_URL}/ask", json={"question": question}, timeout=90)
-            response.raise_for_status()
-            answer = response.json()["answer"].lower()
-            matched = [keyword for keyword in expected_keywords if keyword.lower() in answer]
-            passed_case = len(matched) == len(expected_keywords)
-            message = "PASS" if passed_case else f"FAIL (found {matched})"
-        except requests.RequestException as exc:
-            passed_case, message = False, f"ERROR ({exc})"
-        except (KeyError, ValueError) as exc:
-            passed_case, message = False, f"ERROR (unexpected response: {exc})"
-        passed += int(passed_case)
-        print(f"[{message}] {question}")
-    print(f"\nScore: {passed}/{len(CASES)}")
+def supported(rows, filename, fact):
+    return any(r["filename"] == filename + ".md" and fact.lower() in r["text"].lower() for r in rows)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--answers", action="store_true", help="also send 19 questions to Groq")
+    args = parser.parse_args()
+    if args.answers and not os.getenv("GROQ_API_KEY", "").strip():
+        parser.error("--answers requires GROQ_API_KEY")
+    hits = grounded = abstained = errors = 0
+    with TemporaryDirectory() as tmp:
+        index = Index(Path(tmp))
+        for doc in sorted(DOCS_DIR.glob("*.md")):
+            index.add("eval", doc.name, doc.read_text("utf-8"))
+        app.state.index = index
+        for question, filename, fact in CASES:
+            hit = supported(index.search("eval", question), filename, fact)
+            hits += hit
+            print("HIT " if hit else "MISS", question)
+            if args.answers:
+                try:
+                    result = chat(ChatRequest(site_id="eval", question=question))
+                    ok = fact.lower() in result["answer"].lower() and supported(result["sources"], filename, fact)
+                    grounded += ok
+                    print("  ", "PASS" if ok else "REVIEW", result["answer"])
+                except Exception as exc:
+                    errors += 1
+                    print("   ERROR", exc)
+        if args.answers:
+            for question in UNKNOWN:
+                try:
+                    result = chat(ChatRequest(site_id="eval", question=question))
+                    abstained += result == {"answer": FALLBACK, "sources": []}
+                    print(question, result["answer"])
+                except Exception as exc:
+                    errors += 1
+                    print("ERROR", exc)
+    print(f"Evidence hit@4: {hits}/{len(CASES)} ({hits / len(CASES):.1%})")
+    if args.answers:
+        print(f"Answer + cited fact match: {grounded}/{len(CASES)}; abstention: {abstained}/2; provider errors: {errors}")
+    else:
+        print("Answer grounding and abstention skipped (enable with --answers)")
+    return int(bool(errors))
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
