@@ -41,6 +41,7 @@ async def lifespan(application):
     ):
         raise ValueError("SITE_ADMIN_KEYS must map valid site IDs to nonempty ASCII keys")
     application.state.buckets = {}
+    application.state.next_cleanup = time.monotonic() + 60
     application.state.limit = int(os.getenv("RATE_LIMIT_PER_MINUTE", "30"))
     yield
 
@@ -58,8 +59,8 @@ async def rate_limit(request: Request, call_next):
         now = time.monotonic()
         host = request.client.host if request.client else "local"
         buckets = app.state.buckets
-        # Expire old windows before allocating an entry for a new client.
-        if host not in buckets:
+        if now >= app.state.next_cleanup:
+            app.state.next_cleanup = now + 60
             for key in list(buckets):
                 if buckets[key][0] <= now:
                     del buckets[key]
@@ -71,7 +72,7 @@ async def rate_limit(request: Request, call_next):
                                 headers={"Retry-After": str(math.ceil(until - now))})
         buckets[host] = (until, count + 1)
     response = await call_next(request)
-    if request.url.path in {"/", "/static/index.html"}:
+    if response.headers.get("content-type", "").startswith("text/html"):
         response.headers["Content-Security-Policy"] = "frame-ancestors 'self' " + " ".join(origins)
     return response
 
