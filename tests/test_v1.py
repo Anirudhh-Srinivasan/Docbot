@@ -1,4 +1,7 @@
 import os
+import socket
+import subprocess
+from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -42,6 +45,16 @@ class API(unittest.IsolatedAsyncioTestCase):
                     return await client.post(docs, params={"filename": name}, content=body, headers=headers)
                 async def ask(site):
                     return await client.post("/chat", json={"site_id": site, "question": "How long are logs kept?"})
+                self.assertEqual((await client.get("/health")).json(), {"status": "ok"})
+                home = await client.get("/")
+                self.assertIn("frame-ancestors", home.headers["content-security-policy"])
+                self.assertIn("text/html", home.headers["content-type"])
+                self.assertEqual((await client.get("/static/widget.js")).status_code, 200)
+                origin = "https://unlisted.example"
+                preflight = await client.options("/chat", headers={
+                    "Origin": origin, "Access-Control-Request-Method": "POST",
+                })
+                self.assertNotIn("access-control-allow-origin", preflight.headers)
                 self.assertEqual((await client.get(docs)).status_code, 403)
                 self.assertEqual((await client.get("/sites/beta/documents", headers=headers)).status_code, 403)
                 self.assertEqual((await upload("bad.pdf", b"oops")).status_code, 422)
@@ -53,6 +66,19 @@ class API(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((await upload("policy.md", b"System logs are kept for 30 days.")).json()["document_id"], doc)
                 self.assertEqual(len((await client.get(docs, headers=headers)).json()), 1)
                 self.assertEqual((await ask("beta")).status_code, 404)
+                # Stub only external DNS and curl. Exercise extraction, route and real index.
+                def serve_page(command, **kwargs):
+                    output = command[command.index("--output") + 1]
+                    Path(output).write_text("<p>Beta retains logs for 90 days.</p>")
+                    return subprocess.CompletedProcess(command, 0, b"200 text/html", b"")
+                with patch("documents.socket.getaddrinfo", return_value=[
+                    (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
+                ]), patch("documents.subprocess.run", side_effect=serve_page):
+                    page = await client.post("/sites/beta/urls", headers={"X-Admin-Key": "another"},
+                                             json={"url": "https://example.org/support"})
+                    self.assertEqual(page.status_code, 200, page.text)
+                self.assertEqual(len(app.state.index.search("alpha", "logs")), 1)
+                self.assertIn("90 days", app.state.index.search("beta", "logs")[0]["text"])
                 with patch("app.generate", return_value={"answer": "30 days", "citations": [1]}):
                     reply = (await ask("alpha")).json()
                     self.assertEqual(reply["answer"], "30 days")
