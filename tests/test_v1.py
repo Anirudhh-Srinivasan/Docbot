@@ -1,3 +1,4 @@
+import json
 import os
 import socket
 import subprocess
@@ -7,6 +8,8 @@ import unittest
 from unittest.mock import patch
 
 import httpx
+import uvloop
+from groq import Groq
 
 from app import FALLBACK, app, lifespan
 from documents import PageText, fetch_page
@@ -31,6 +34,9 @@ class Parsing(unittest.TestCase):
 
 
 class API(unittest.IsolatedAsyncioTestCase):
+    # Match the uvicorn[standard] Linux event loop on Python 3.13+.
+    loop_factory = staticmethod(uvloop.new_event_loop)
+
     async def test_site_lifecycle(self):
         with TemporaryDirectory() as tmp, patch.dict(os.environ, {
             "CHROMA_PATH": tmp, "SITE_ADMIN_KEYS": '{"alpha":"secret","beta":"another"}',
@@ -79,7 +85,20 @@ class API(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(page.status_code, 200, page.text)
                 self.assertEqual(len(app.state.index.search("alpha", "logs")), 1)
                 self.assertIn("90 days", app.state.index.search("beta", "logs")[0]["text"])
-                with patch("app.generate", return_value={"answer": "30 days", "citations": [1]}):
+                def completion(request):
+                    payload = json.loads(request.content)
+                    self.assertEqual(payload["model"], "llama-3.3-70b-versatile")
+                    evidence = json.loads(payload["messages"][1]["content"])["evidence"]
+                    self.assertEqual(evidence, [{"id": 1, "text": "System logs are kept for 30 days."}])
+                    return httpx.Response(200, json={
+                        "id": "test", "created": 1, "model": payload["model"], "object": "chat.completion",
+                        "choices": [{"index": 0, "finish_reason": "stop", "message": {
+                            "role": "assistant", "content": json.dumps({"answer": "30 days", "citations": [1]}),
+                        }}],
+                    })
+                transport = httpx.MockTransport(completion)
+                sdk = Groq(api_key="test-only", http_client=httpx.Client(transport=transport))
+                with patch("app.Groq", return_value=sdk):
                     reply = (await ask("alpha")).json()
                     self.assertEqual(reply["answer"], "30 days")
                     self.assertEqual(reply["sources"][0]["document_id"], doc)
